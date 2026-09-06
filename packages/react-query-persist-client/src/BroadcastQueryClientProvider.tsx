@@ -14,6 +14,11 @@ export type BroadcastQueryClientProviderProps = QueryClientProviderProps & {
   broadcastOptions: OmitKeyof<BroadcastQueryClientRestoreOptions, 'queryClient'>
 }
 
+/**
+ * Provides a QueryClient while gating descendant queries during cross-tab
+ * cache bootstrap. The session is cleaned up when the client changes or the
+ * provider unmounts.
+ */
 export const BroadcastQueryClientProvider = ({
   children,
   broadcastOptions,
@@ -22,10 +27,16 @@ export const BroadcastQueryClientProvider = ({
   const parentIsRestoring = useIsRestoring()
   const [isRestoring, setIsRestoring] = React.useState(true)
   const optionsRef = React.useRef(broadcastOptions)
+  const [previousClient, setPreviousClient] = React.useState(props.client)
+  const clientChanged = previousClient !== props.client
 
   React.useEffect(() => {
     optionsRef.current = broadcastOptions
   })
+
+  React.useEffect(() => {
+    setPreviousClient(props.client)
+  }, [props.client])
 
   React.useEffect(() => {
     setIsRestoring(true)
@@ -49,7 +60,9 @@ export const BroadcastQueryClientProvider = ({
 
   return (
     <QueryClientProvider {...props}>
-      <IsRestoringProvider value={parentIsRestoring || isRestoring}>
+      <IsRestoringProvider
+        value={parentIsRestoring || isRestoring || clientChanged}
+      >
         {children}
       </IsRestoringProvider>
     </QueryClientProvider>

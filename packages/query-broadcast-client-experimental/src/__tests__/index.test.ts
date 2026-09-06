@@ -179,6 +179,230 @@ describe('broadcastQueryClient', () => {
     }
   })
 
+  it('should restore queries from multiple live responder sessions', async () => {
+    vi.useFakeTimers()
+    let requesterCleanup: (() => void) | undefined
+    let responderBCleanup: (() => void) | undefined
+    let responderCCleanup: (() => void) | undefined
+    try {
+      const responderBQueryClient = new QueryClient()
+      responderBQueryClient.setQueryData(['from-b'], 'data from B')
+      const responderCQueryClient = new QueryClient()
+      responderCQueryClient.setQueryData(['from-c'], 'data from C')
+
+      const [cleanup, restored] = broadcastQueryClientRestore({
+        queryClient,
+        broadcastChannel: 'test_channel',
+        timeout: 100,
+      })
+      requesterCleanup = cleanup
+      const requesterChannel = createdChannels[0]
+      const request = mockPostMessage.mock.calls[0]?.[0]
+
+      responderBCleanup = broadcastQueryClient({
+        queryClient: responderBQueryClient,
+        broadcastChannel: 'test_channel',
+        respondToCacheRequests: true,
+      })
+      const responderBChannel = createdChannels[1]
+      responderCCleanup = broadcastQueryClient({
+        queryClient: responderCQueryClient,
+        broadcastChannel: 'test_channel',
+        respondToCacheRequests: true,
+      })
+      const responderCChannel = createdChannels[2]
+
+      responderBChannel?.onmessage?.(request)
+      responderCChannel?.onmessage?.(request)
+
+      const responses = mockPostMessage.mock.calls
+        .slice(1)
+        .map(([message]) => message)
+      expect(responses).toHaveLength(2)
+      expect(
+        new Set(responses.map((response) => response.responderId)).size,
+      ).toBe(2)
+      expect(responses).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            query: expect.objectContaining({
+              queryKey: ['from-b'],
+              state: expect.objectContaining({ data: 'data from B' }),
+            }),
+          }),
+          expect.objectContaining({
+            query: expect.objectContaining({
+              queryKey: ['from-c'],
+              state: expect.objectContaining({ data: 'data from C' }),
+            }),
+          }),
+        ]),
+      )
+      responses.forEach((response) => requesterChannel?.onmessage?.(response))
+
+      let completed = false
+      void restored.then(() => {
+        completed = true
+      })
+      expect(completed).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(100)
+      await restored
+
+      expect(queryClient.getQueryData(['from-b'])).toBe('data from B')
+      expect(queryClient.getQueryData(['from-c'])).toBe('data from C')
+    } finally {
+      responderCCleanup?.()
+      responderBCleanup?.()
+      requesterCleanup?.()
+      vi.useRealTimers()
+    }
+  })
+
+  it('should wait for the timeout when one peer remains silent', async () => {
+    vi.useFakeTimers()
+    let requesterCleanup: (() => void) | undefined
+    let responderCleanup: (() => void) | undefined
+    let silentPeerCleanup: (() => void) | undefined
+    try {
+      const responderQueryClient = new QueryClient()
+      responderQueryClient.setQueryData(['from-responder'], 'data')
+      const silentPeerQueryClient = new QueryClient()
+      silentPeerQueryClient.setQueryData(['from-silent-peer'], 'not sent')
+
+      const [cleanup, restored] = broadcastQueryClientRestore({
+        queryClient,
+        broadcastChannel: 'test_channel',
+        timeout: 100,
+      })
+      requesterCleanup = cleanup
+      const requesterChannel = createdChannels[0]
+      const request = mockPostMessage.mock.calls[0]?.[0]
+
+      responderCleanup = broadcastQueryClient({
+        queryClient: responderQueryClient,
+        broadcastChannel: 'test_channel',
+        respondToCacheRequests: true,
+      })
+      const responderChannel = createdChannels[1]
+      silentPeerCleanup = broadcastQueryClient({
+        queryClient: silentPeerQueryClient,
+        broadcastChannel: 'test_channel',
+      })
+      const silentPeerChannel = createdChannels[2]
+
+      responderChannel?.onmessage?.(request)
+      // The protocol cannot distinguish a missing peer from a peer that
+      // receives the request but never sends a response.
+      silentPeerChannel?.onmessage?.(request)
+
+      const responses = mockPostMessage.mock.calls
+        .slice(1)
+        .map(([message]) => message)
+      expect(responses).toHaveLength(1)
+      expect(responses[0]?.query.queryKey).toEqual(['from-responder'])
+      requesterChannel?.onmessage?.(responses[0])
+
+      let completed = false
+      void restored.then(() => {
+        completed = true
+      })
+      await vi.advanceTimersByTimeAsync(99)
+
+      expect(completed).toBe(false)
+      expect(queryClient.getQueryData(['from-responder'])).toBe('data')
+
+      await vi.advanceTimersByTimeAsync(1)
+      await restored
+      expect(completed).toBe(true)
+    } finally {
+      silentPeerCleanup?.()
+      responderCleanup?.()
+      requesterCleanup?.()
+      vi.useRealTimers()
+    }
+  })
+
+  it('should keep the newest state when responders answer the same query out of order', async () => {
+    vi.useFakeTimers()
+    let requesterCleanup: (() => void) | undefined
+    let responderBCleanup: (() => void) | undefined
+    let responderCCleanup: (() => void) | undefined
+    try {
+      const sharedKey = ['shared']
+      const responderBQueryClient = new QueryClient()
+      responderBQueryClient.setQueryData(sharedKey, 'older', { updatedAt: 10 })
+      const responderCQueryClient = new QueryClient()
+      responderCQueryClient.setQueryData(sharedKey, 'newer', { updatedAt: 20 })
+
+      const [cleanup, restored] = broadcastQueryClientRestore({
+        queryClient,
+        broadcastChannel: 'test_channel',
+        timeout: 100,
+      })
+      requesterCleanup = cleanup
+      const requesterChannel = createdChannels[0]
+      const request = mockPostMessage.mock.calls[0]?.[0]
+
+      responderBCleanup = broadcastQueryClient({
+        queryClient: responderBQueryClient,
+        broadcastChannel: 'test_channel',
+        respondToCacheRequests: true,
+      })
+      const responderBChannel = createdChannels[1]
+      responderCCleanup = broadcastQueryClient({
+        queryClient: responderCQueryClient,
+        broadcastChannel: 'test_channel',
+        respondToCacheRequests: true,
+      })
+      const responderCChannel = createdChannels[2]
+
+      responderBChannel?.onmessage?.(request)
+      responderCChannel?.onmessage?.(request)
+
+      const responses = mockPostMessage.mock.calls
+        .slice(1)
+        .map(([message]) => message)
+      expect(responses).toHaveLength(2)
+
+      const olderResponse = responses.find(
+        (response) => response.query.state.dataUpdatedAt === 10,
+      )
+      const newerResponse = responses.find(
+        (response) => response.query.state.dataUpdatedAt === 20,
+      )
+      expect(olderResponse).toEqual(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            state: expect.objectContaining({ data: 'older' }),
+          }),
+        }),
+      )
+      expect(newerResponse).toEqual(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            state: expect.objectContaining({ data: 'newer' }),
+          }),
+        }),
+      )
+
+      // The responder with the newer data answers first; the older response
+      // must not degrade the state that was already hydrated.
+      requesterChannel?.onmessage?.(newerResponse)
+      requesterChannel?.onmessage?.(olderResponse)
+
+      await vi.advanceTimersByTimeAsync(100)
+      await restored
+
+      expect(queryClient.getQueryData(sharedKey)).toBe('newer')
+    } finally {
+      responderCCleanup?.()
+      responderBCleanup?.()
+      requesterCleanup?.()
+      vi.useRealTimers()
+    }
+  })
+
   it('should ignore unknown and late bootstrap responses', async () => {
     vi.useFakeTimers()
     try {
@@ -971,7 +1195,7 @@ describe('broadcastQueryClient', () => {
     process.env['NODE_ENV'] = previousNodeEnv
   })
 
-  it('should answer bootstrap requests from the existing live-sync API', () => {
+  it('should not answer bootstrap requests from a plain live-sync session', () => {
     const key = queryKey()
     const peerQueryClient = new QueryClient()
     peerQueryClient.setQueryData(key, { from: 'peer' })
@@ -980,33 +1204,62 @@ describe('broadcastQueryClient', () => {
       broadcastChannel: 'test_channel',
     })
 
-    const peerChannel = createdChannels[0]!
-    peerChannel.onmessage?.({
-      type: 'cache-request',
-      requestId: 'request-1',
+    try {
+      const peerChannel = createdChannels[0]!
+      peerChannel.onmessage?.({
+        type: 'cache-request',
+        requestId: 'request-1',
+      })
+
+      expect(mockPostMessage).not.toHaveBeenCalled()
+    } finally {
+      peerCleanup()
+    }
+  })
+
+  it('should answer filtered bootstrap requests from an opted-in live-sync session', () => {
+    const peerQueryClient = new QueryClient()
+    peerQueryClient.setQueryData(['include'], 'included')
+    peerQueryClient.setQueryData(['exclude'], 'excluded')
+    const peerCleanup = broadcastQueryClient({
+      queryClient: peerQueryClient,
+      broadcastChannel: 'test_channel',
+      respondToCacheRequests: true,
+      dehydrateOptions: {
+        shouldDehydrateQuery: (query) => query.queryKey[0] === 'include',
+      },
     })
 
-    expect(mockPostMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'cache-response',
-        requestId: 'request-1',
-        query: expect.objectContaining({
-          queryKey: key,
-        }),
-      }),
-    )
+    try {
+      const peerChannel = createdChannels[0]!
+      peerChannel.onmessage?.({
+        type: 'cache-request',
+        requestId: 'filtered-request',
+      })
 
-    peerCleanup()
+      expect(mockPostMessage).toHaveBeenCalledTimes(1)
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cache-response',
+          requestId: 'filtered-request',
+          query: expect.objectContaining({ queryKey: ['include'] }),
+        }),
+      )
+    } finally {
+      peerCleanup()
+    }
   })
 
   it('should resolve restore after a timeout with no peer response', async () => {
     vi.useFakeTimers()
+    let cleanup: (() => void) | undefined
     try {
-      const [cleanup, restored] = broadcastQueryClientRestore({
+      const [restoreCleanup, restored] = broadcastQueryClientRestore({
         queryClient,
         broadcastChannel: 'test_channel',
         timeout: 100,
       })
+      cleanup = restoreCleanup
       let completed = false
       void restored.then(() => {
         completed = true
@@ -1015,8 +1268,9 @@ describe('broadcastQueryClient', () => {
       expect(completed).toBe(false)
       await vi.advanceTimersByTimeAsync(100)
       expect(completed).toBe(true)
-      cleanup()
+      expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
     } finally {
+      cleanup?.()
       vi.useRealTimers()
     }
   })
@@ -1034,6 +1288,7 @@ describe('broadcastQueryClient', () => {
 
       cleanup()
       await restored
+      expect(lastCreatedChannel.onmessage).toBeNull()
 
       lastCreatedChannel.onmessage?.({
         type: 'cache-response',
@@ -1109,7 +1364,9 @@ describe('broadcastQueryClient', () => {
   })
 
   it('should not include mutations in a bootstrap response', () => {
+    const includedQueryKey = ['included-query']
     const peerQueryClient = new QueryClient()
+    peerQueryClient.setQueryData(includedQueryKey, 'included')
     peerQueryClient.getMutationCache().build(
       peerQueryClient,
       {
@@ -1131,16 +1388,33 @@ describe('broadcastQueryClient', () => {
     const peerCleanup = broadcastQueryClient({
       queryClient: peerQueryClient,
       broadcastChannel: 'test_channel',
+      respondToCacheRequests: true,
     })
 
-    mockPostMessage.mockClear()
-    lastCreatedChannel.onmessage?.({
-      type: 'cache-request',
-      requestId: 'request-1',
-    })
+    try {
+      mockPostMessage.mockClear()
+      lastCreatedChannel.onmessage?.({
+        type: 'cache-request',
+        requestId: 'request-1',
+      })
 
-    expect(mockPostMessage).not.toHaveBeenCalled()
-    peerCleanup()
+      expect(mockPostMessage).toHaveBeenCalledTimes(1)
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cache-response',
+          requestId: 'request-1',
+          query: expect.objectContaining({ queryKey: includedQueryKey }),
+        }),
+      )
+      expect(mockPostMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cache-response',
+          query: expect.objectContaining({ queryKey: ['mutation'] }),
+        }),
+      )
+    } finally {
+      peerCleanup()
+    }
   })
 
   it('should reject invalid restore timeout values synchronously', () => {

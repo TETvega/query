@@ -39,7 +39,10 @@ export function withBroadcastQueryClient(
       provide: ENVIRONMENT_INITIALIZER,
       multi: true,
       useValue: () => {
-        if (!isPlatformBrowser(inject(PLATFORM_ID))) return
+        if (!isPlatformBrowser(inject(PLATFORM_ID))) {
+          isRestoring.set(false)
+          return
+        }
 
         const destroyRef = inject(DestroyRef)
         const queryClient = inject(QueryClient)

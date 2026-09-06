@@ -44,17 +44,26 @@ const [cleanup, restored] = broadcastQueryClientRestore({
 
 await restored
 renderApplication()
+
+// Later, when this QueryClient or broadcast session is disposed or replaced:
+cleanup()
 ```
 
-The restore API starts normal live synchronization on the same channel before
-requesting snapshots. Do not call both APIs for the same QueryClient and
-channel; the restore API already owns the live session.
+Keep `cleanup` for the lifetime of the QueryClient. Do not call it immediately
+after `restored`, because the restore session also owns live synchronization.
+Call it when the QueryClient or session is disposed or replaced so the previous
+channel and query-cache listeners do not remain active.
 
-The response window accepts snapshots from every available tab. Query state is
-merged with dataUpdatedAt, so the newest state for each query wins. Bootstrap
-includes successful queries by default and excludes mutations. Each query is
-sent independently so a structured-clone failure does not discard all valid
-queries.
+The restore API starts normal live synchronization on the same channel before
+requesting snapshots, and automatically responds to restore requests. Do not
+call both APIs for the same QueryClient and channel; the restore API already
+owns the live session.
+
+The response window accepts snapshots from configured responder sessions. Query
+state is merged with dataUpdatedAt, so the newest state for each query wins.
+Bootstrap includes successful queries by default and excludes mutations. Each
+query is sent independently so a structured-clone failure does not discard all
+valid queries.
 
 Framework applications should use the existing restore-aware integration:
 
@@ -108,6 +117,15 @@ interface BroadcastQueryClientOptions {
     error: unknown,
     event: BroadcastErrorEvent,
   ) => void | Promise<void>
+  /** Whether a live-sync session may answer cache bootstrap requests. */
+  respondToCacheRequests?: boolean
+  /** Used when this session answers cache bootstrap requests. */
+  dehydrateOptions?: Pick<DehydrateOptions, 'shouldDehydrateQuery'>
+  /** Called for bootstrap request, response, or hydration failures. */
+  onBroadcastRestoreError?: (
+    error: unknown,
+    event: BroadcastRestoreErrorEvent,
+  ) => void | Promise<void>
 }
 
 interface BroadcastErrorEvent {
@@ -115,6 +133,39 @@ interface BroadcastErrorEvent {
   queryHash: string
   queryKey: QueryKey
 }
+
+interface BroadcastRestoreErrorEvent {
+  type: 'request' | 'response' | 'hydrate'
+  requestId: string
+  responderId?: string
+  responseId?: string
+  queryHash?: string
+  queryKey?: QueryKey
+}
+
+interface BroadcastQueryClientRestoreOptions extends Omit<
+  BroadcastQueryClientOptions,
+  'respondToCacheRequests'
+> {
+  timeout?: number
+  hydrateOptions?: HydrateOptions
+}
+```
+
+Existing `broadcastQueryClient` sessions do not answer bootstrap requests by
+default. A live-sync session can explicitly opt in when it should provide
+snapshots to restoring tabs. `broadcastQueryClientRestore` is already a
+responder and does not accept `respondToCacheRequests`:
+
+```tsx
+broadcastQueryClient({
+  queryClient,
+  broadcastChannel: 'my-app',
+  respondToCacheRequests: true,
+  dehydrateOptions: {
+    shouldDehydrateQuery: (query) => query.queryKey[0] !== 'private',
+  },
+})
 ```
 
 The default options are:
@@ -153,8 +204,8 @@ separately from the existing live-sync onBroadcastError callback so existing
 callbacks retain their current type and behavior.
 
 The default timeout is 1000ms. A longer window improves the chance of receiving
-the freshest state from another tab but increases cold-start latency when no
-peer exists. A timeout of 0 disables the normal bootstrap wait.
+the freshest state from an available responder session but increases cold-start
+latency when no responder exists. A timeout of 0 does not wait for responses.
 
 For bootstrap failures, use onBroadcastRestoreError:
 

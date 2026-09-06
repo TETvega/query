@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Component, provideZonelessChangeDetection } from '@angular/core'
+import {
+  Component,
+  PLATFORM_ID,
+  provideZonelessChangeDetection,
+} from '@angular/core'
 import { render } from '@testing-library/angular'
 import {
   QueryClient,
@@ -111,6 +115,38 @@ describe('withBroadcastQueryClient', () => {
     await rendered.fixture.whenStable()
     rendered.fixture.detectChanges()
 
+    expect(queryFn).toHaveBeenCalledOnce()
+    rendered.fixture.destroy()
+  })
+
+  it('does not leave server queries behind the restore gate', async () => {
+    const queryFn = vi.fn().mockResolvedValue('server')
+    const queryClient = new QueryClient()
+
+    @Component({
+      template: '<div>{{ state.data() ?? state.fetchStatus() }}</div>',
+    })
+    class Page {
+      state = injectQuery(() => ({
+        queryKey: ['server-bootstrap'],
+        queryFn,
+      }))
+    }
+
+    const rendered = await render(Page, {
+      providers: [
+        { provide: PLATFORM_ID, useValue: 'server' },
+        provideZonelessChangeDetection(),
+        provideTanStackQuery(
+          queryClient,
+          withBroadcastQueryClient({ broadcastChannel: 'test-channel' }),
+        ),
+      ],
+    })
+
+    await rendered.fixture.whenStable()
+
+    expect(mockState.restore).not.toHaveBeenCalled()
     expect(queryFn).toHaveBeenCalledOnce()
     rendered.fixture.destroy()
   })

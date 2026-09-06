@@ -85,29 +85,45 @@ export interface BroadcastQueryClientOptions {
     error: unknown,
     event: BroadcastErrorEvent,
   ) => void | Promise<void>
-}
-
-export interface BroadcastQueryClientRestoreOptions extends BroadcastQueryClientOptions {
   /**
-   * Maximum time to wait for bootstrap responses.
-   * @default 1000
+   * Allows this live-sync session to respond to bootstrap requests from
+   * restore-enabled sessions. `broadcastQueryClientRestore` responds
+   * automatically and does not expose this option.
+   * @default false
    */
-  timeout?: number
+  respondToCacheRequests?: boolean
   /**
-   * Query dehydration options. Mutations are never included in broadcast
-   * bootstrap.
+   * Query dehydration options used when this session responds to bootstrap
+   * requests. They have no effect on a live-only session unless
+   * `respondToCacheRequests` is enabled. Mutations are never included in
+   * bootstrap snapshots.
    */
   dehydrateOptions?: Pick<DehydrateOptions, 'shouldDehydrateQuery'>
-  /** Options used when applying each incoming query snapshot. */
-  hydrateOptions?: HydrateOptions
   /**
    * Called when a bootstrap request, response, or hydration operation fails.
-   * Failures are isolated so valid query snapshots can still be restored.
+   * Live synchronization failures continue to use `onBroadcastError`.
    */
   onBroadcastRestoreError?: (
     error: unknown,
     event: BroadcastRestoreErrorEvent,
   ) => void | Promise<void>
+}
+
+/**
+ * Options for live synchronization with an initial cache bootstrap. The
+ * restore session responds to cache requests automatically.
+ */
+export interface BroadcastQueryClientRestoreOptions extends Omit<
+  BroadcastQueryClientOptions,
+  'respondToCacheRequests'
+> {
+  /**
+   * Maximum time to wait for responses from configured responder sessions.
+   * @default 1000
+   */
+  timeout?: number
+  /** Options used when applying each incoming query snapshot. */
+  hydrateOptions?: HydrateOptions
 }
 
 type InternalOptions = BroadcastQueryClientOptions & {
@@ -182,6 +198,9 @@ function createBroadcastSession({
   broadcastChannel = 'tanstack-query',
   options,
   onBroadcastError,
+  respondToCacheRequests,
+  dehydrateOptions,
+  onBroadcastRestoreError,
   restoreOptions,
 }: InternalOptions): Session {
   const timeout = restoreOptions?.timeout ?? DEFAULT_RESTORE_TIMEOUT
@@ -292,14 +311,14 @@ function createBroadcastSession({
     error: unknown,
     event: BroadcastRestoreErrorEvent,
   ) => {
-    if (!restoreOptions?.onBroadcastRestoreError) {
+    if (!onBroadcastRestoreError) {
       warnRestoreError(error, event)
       return
     }
 
     let result: void | Promise<void>
     try {
-      result = restoreOptions.onBroadcastRestoreError(error, event)
+      result = onBroadcastRestoreError(error, event)
     } catch (callbackError) {
       warnRestoreError(callbackError, event)
       return
@@ -335,10 +354,19 @@ function createBroadcastSession({
     }
   }
 
+  /**
+   * Answers bootstrap requests only for restore sessions or explicitly opted-in
+   * live-sync sessions, preserving the legacy API's live-only behavior.
+   */
   const respondToCacheRequest = (request: CacheRequest) => {
+    if (!restoreOptions && !respondToCacheRequests) {
+      return
+    }
+
     let snapshot: DehydratedState
     try {
       snapshot = dehydrate(queryClient, {
+        ...dehydrateOptions,
         ...restoreOptions?.dehydrateOptions,
         shouldDehydrateMutation: () => false,
       })
@@ -547,12 +575,23 @@ function createBroadcastSession({
   return { cleanup, restorePromise }
 }
 
+/**
+ * Starts live synchronization for a QueryClient without requesting an initial
+ * cache snapshot. Set `respondToCacheRequests` to opt into answering restore
+ * requests from other sessions.
+ * @returns A function that stops synchronization and closes the channel.
+ */
 export function broadcastQueryClient(
   options: BroadcastQueryClientOptions,
 ): () => void {
   return createBroadcastSession(options).cleanup
 }
 
+/**
+ * Starts live synchronization, automatically answers restore requests, and
+ * requests an initial cache snapshot before resolving the restore promise.
+ * @returns Cleanup and a promise that settles when restore or cleanup completes.
+ */
 export function broadcastQueryClientRestore(
   options: BroadcastQueryClientRestoreOptions,
 ): [cleanup: () => void, restorePromise: Promise<void>] {

@@ -8,6 +8,8 @@
 '@tanstack/angular-query-persist-client': minor
 ---
 
-Add opt-in cross-tab QueryClient bootstrap and restore-gate integrations to
-prevent duplicate initial requests when a fresh tab opens. Existing
-broadcastQueryClient usage remains synchronous and live-sync-only.
+Add cross-tab QueryClient bootstrap and restore-gate integrations to prevent
+duplicate initial requests when a fresh tab opens. `broadcastQueryClientRestore`
+automatically requests and responds to cache snapshots, while existing
+`broadcastQueryClient` usage remains live-sync-only unless
+`respondToCacheRequests` is explicitly enabled.
